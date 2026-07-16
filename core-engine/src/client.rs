@@ -1,5 +1,9 @@
 use prism::ai_service_client::AiServiceClient;
-use prism::{IntentRequest, IntentResponse, HealthCheckRequest, HealthCheckResponse};
+use prism::{
+    IntentRequest, IntentResponse,
+    HealthCheckRequest, HealthCheckResponse,
+    DiagnosisRequest, DiagnosisResponse
+};
 use tonic::transport::Channel;
 use tracing::{info, error};
 
@@ -62,6 +66,42 @@ impl PrismClient {
             }
             Err(status) => {
                 error!(error_code = ?status.code(), error_msg = %status.message(), "ParseIntent request failed");
+                Err(status)
+            }
+        }
+    }
+
+    /// Invokes the Reasoning Engine to diagnose the root cause and generate a corrective action plan
+    pub async fn analyze_root_cause(
+        &mut self,
+        intent: &str,
+        system_metrics_json: &str,
+        platform: &str
+    ) -> Result<DiagnosisResponse, tonic::Status> {
+        let request = tonic::Request::new(DiagnosisRequest {
+            intent: intent.to_string(),
+            system_metrics_json: system_metrics_json.to_string(),
+            platform: platform.to_string(),
+        });
+
+        info!(intent = %intent, platform = %platform, "Sending AnalyzeRootCause request to AI Service");
+        match self.client.analyze_root_cause(request).await {
+            Ok(response) => {
+                let inner = response.into_inner();
+                info!(
+                    root_cause = %inner.root_cause,
+                    severity = %inner.severity,
+                    task_count = %inner.action_plan.len(),
+                    "Received DiagnosisResponse"
+                );
+                Ok(inner)
+            }
+            Err(status) => {
+                error!(
+                    error_code = ?status.code(),
+                    error_msg = %status.message(),
+                    "AnalyzeRootCause request failed"
+                );
                 Err(status)
             }
         }

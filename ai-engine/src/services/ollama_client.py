@@ -5,7 +5,8 @@ from loguru import logger
 class OllamaClient:
     """
     Client wrapper for interacting with a local Ollama service.
-    Uses system prompts and the JSON format option to extract structured NLU intents.
+    Uses system prompts and the JSON format option to extract structured NLU intents
+    and generate structured root cause diagnoses and repair action plans.
     """
 
     def __init__(self, endpoint: str = "http://127.0.0.1:11434", model: str = "qwen2.5:3b"):
@@ -81,5 +82,71 @@ class OllamaClient:
         logger.debug(f"Raw response from Ollama: {response_text}")
 
         # Parse text response as JSON
+        parsed_response = json.loads(response_text)
+        return parsed_response
+
+    def analyze_root_cause_with_llm(self, intent: str, system_metrics_json: str, platform: str) -> dict:
+        """
+        Sends the intent, host system metrics, and platform to local LLM.
+        Instructs it to output a JSON-formatted root cause diagnosis and action plan.
+        """
+        url = f"{self.endpoint}/api/generate"
+
+        system_prompt = (
+            "You are the reasoning and repair planning core of PRISM, an autonomous OS management engine.\n"
+            "Your task is to analyze the detected user intent, review the collected host system metrics JSON, "
+            "and construct a detailed diagnosis and step-by-step action plan to safely resolve the issue.\n\n"
+            "Available Actions you can generate:\n"
+            "1. kill_process: Terminates a process. Parameters: 'process_name' (e.g. 'Code.exe') or 'pid'.\n"
+            "2. delete_file: Deletes a directory/file safely. Parameters: 'file_path' or 'directory_path'.\n"
+            "3. restart_service: Restarts a system service (Windows only). Parameters: 'service_name'.\n"
+            "4. run_command: Runs a safe command. Parameters: 'command_line'.\n\n"
+            "Output MUST be a valid JSON object matching the following structure:\n"
+            "{\n"
+            '  "root_cause": "Detailed description of what is causing the issue based on the intent and metrics.",\n'
+            '  "severity": "low" | "medium" | "high",\n'
+            '  "action_plan": [\n'
+            "    {\n"
+            '      "id": "task_id",\n'
+            '      "action": "kill_process" | "delete_file" | "restart_service" | "run_command",\n'
+            '      "parameters": {\n'
+            '        "param_key": "param_value"\n'
+            "      },\n"
+            '      "dependencies": ["dependency_task_id"]\n'
+            "    }\n"
+            "  ],\n"
+            '  "explanation": "Why this action plan was chosen and how it safely fixes the system."\n'
+            "}\n"
+            "Do not return any conversational text outside the JSON block."
+        )
+
+        prompt = (
+            f"Platform: {platform}\n"
+            f"Detected Intent: {intent}\n"
+            f"System Metrics JSON: {system_metrics_json}\n\n"
+            f"JSON Output:"
+        )
+
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "system": system_prompt,
+            "stream": False,
+            "format": "json",
+            "options": {
+                "temperature": 0.0,
+            }
+        }
+
+        logger.info("Sending AnalyzeRootCause prompt to local LLM...")
+        response = requests.post(url, json=payload, timeout=15.0)
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Ollama returned status code {response.status_code}: {response.text}")
+
+        result_json = response.json()
+        response_text = result_json.get("response", "").strip()
+
+        logger.debug(f"Raw diagnosis response from Ollama: {response_text}")
         parsed_response = json.loads(response_text)
         return parsed_response

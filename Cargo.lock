@@ -992,6 +992,7 @@ name = "terminal"
 version = "0.1.0"
 dependencies = [
  "core-engine",
+ "diagnostics",
  "tokio",
  "tracing",
  "tracing-subscriber",

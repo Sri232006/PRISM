@@ -1,5 +1,6 @@
 import os
 import time
+import json
 from loguru import logger
 import grpc
 
@@ -97,12 +98,152 @@ class AiServiceHandler(prism_pb2_grpc.AiServiceServicer):
         )
 
     def AnalyzeRootCause(self, request, context):
-        logger.info(f"AnalyzeRootCause invoked for intent={request.intent}")
+        intent = request.intent.strip()
+        system_metrics_json = request.system_metrics_json.strip()
+        platform = request.platform.strip()
+        logger.info(f"AnalyzeRootCause invoked with intent='{intent}', platform='{platform}'")
+
+        # Try local LLM (Ollama) first
+        if self.ollama.is_online():
+            try:
+                result = self.ollama.analyze_root_cause_with_llm(intent, system_metrics_json, platform)
+                root_cause = result.get("root_cause", "Unknown root cause resolved by LLM.")
+                severity = result.get("severity", "medium")
+                action_plan_raw = result.get("action_plan", [])
+                explanation = result.get("explanation", "Reasoning generated via local LLM.")
+
+                action_plan = []
+                for t in action_plan_raw:
+                    task_id = t.get("id", "task_unknown")
+                    action = t.get("action", "")
+                    parameters = t.get("parameters", {})
+                    dependencies = t.get("dependencies", [])
+
+                    flat_params = {}
+                    for k, v in parameters.items():
+                        if v is not None:
+                            flat_params[str(k)] = str(v)
+
+                    action_plan.append(prism_pb2.Task(
+                        id=task_id,
+                        action=action,
+                        parameters=flat_params,
+                        dependencies=[str(d) for d in dependencies]
+                    ))
+
+                logger.info(f"Successfully generated diagnosis via LLM with {len(action_plan)} tasks.")
+                return prism_pb2.DiagnosisResponse(
+                    root_cause=root_cause,
+                    severity=severity,
+                    action_plan=action_plan,
+                    explanation=explanation
+                )
+            except Exception as e:
+                logger.warning(f"Failed to analyze root cause via local LLM: {e}. Invoking fallback heuristics.")
+        else:
+            logger.warning("Ollama is offline. Analyzing root cause via programmatic heuristics.")
+
+        # Fallback Heuristics
+        root_cause = "Heuristic rule matching user intent."
+        severity = "medium"
+        action_plan = []
+        explanation = "Programmatic analysis triggered due to local LLM offline status."
+
+        # Parse metrics safely to perform heuristic checks
+        metrics = {}
+        try:
+            if system_metrics_json:
+                metrics = json.loads(system_metrics_json)
+        except Exception as parse_err:
+            logger.warning(f"Failed to parse system metrics JSON: {parse_err}")
+
+        if intent == "optimize_ram":
+            root_cause = "High RAM usage detected. System responsiveness is impaired."
+            severity = "high"
+
+            # Find the top resource-consuming process from metrics
+            top_processes = metrics.get("top_processes", [])
+            target_proc = "Code.exe" if platform == "windows" else "code"
+            target_pid = "0"
+            max_mem = 0
+
+            for proc in top_processes:
+                p_name = proc.get("name", "")
+                p_mem = proc.get("memory_bytes", 0)
+                # Ignore system processes/explorer to avoid killing the OS
+                if p_name.lower() not in ["explorer.exe", "system", "idle", "taskmgr.exe"]:
+                    if p_mem > max_mem:
+                        max_mem = p_mem
+                        target_proc = p_name
+                        target_pid = str(proc.get("pid", 0))
+
+            action_plan.append(prism_pb2.Task(
+                id="task_kill_heavy_process",
+                action="kill_process",
+                parameters={
+                    "process_name": target_proc,
+                    "pid": target_pid
+                },
+                dependencies=[]
+            ))
+            explanation = f"Terminating resource-heavy process '{target_proc}' (PID: {target_pid}) to immediately reclaim physical RAM."
+
+        elif intent == "clean_junk":
+            root_cause = "Temporary directory storage buildup leading to diminished free space."
+            severity = "low"
+
+            target_path = "C:\\Windows\\Temp" if platform == "windows" else "/tmp"
+
+            action_plan.append(prism_pb2.Task(
+                id="task_delete_temp_files",
+                action="delete_file",
+                parameters={
+                    "directory_path": target_path,
+                    "safe_cleanup": "true"
+                },
+                dependencies=[]
+            ))
+            explanation = f"Clearing files located inside temporary directory '{target_path}' to reclaim disk space."
+
+        elif intent == "network_reset":
+            root_cause = "Network adapter or DNS resolver failure."
+            severity = "medium"
+
+            cmd = "ipconfig /flushdns" if platform == "windows" else "systemd-resolve --flush-caches"
+
+            action_plan.append(prism_pb2.Task(
+                id="task_flush_dns",
+                action="run_command",
+                parameters={
+                    "command_line": cmd
+                },
+                dependencies=[]
+            ))
+
+            if platform == "windows":
+                # Add a service restart as dependency
+                action_plan.append(prism_pb2.Task(
+                    id="task_restart_wlan",
+                    action="restart_service",
+                    parameters={
+                        "service_name": "WlanSvc"
+                    },
+                    dependencies=["task_flush_dns"]
+                ))
+
+            explanation = "Flushing DNS resolver cache and restarting network interfaces to re-establish connections."
+
+        else:
+            root_cause = "Unrecognized intent. Manual inspection recommended."
+            severity = "low"
+            explanation = "No automatic remedy plan generated for unknown category."
+
+        logger.info(f"Generated heuristic diagnosis: root_cause='{root_cause}', tasks={len(action_plan)}")
         return prism_pb2.DiagnosisResponse(
-            root_cause="Heuristic analysis placeholder.",
-            severity="medium",
-            action_plan=[],
-            explanation="Reasoning Engine will be integrated in a later phase."
+            root_cause=root_cause,
+            severity=severity,
+            action_plan=action_plan,
+            explanation=explanation
         )
 
     def LearnFromRepair(self, request, context):
