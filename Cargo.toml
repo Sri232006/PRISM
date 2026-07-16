@@ -8,4 +8,5 @@ members = [
     "scheduler",
     "memory",
     "plugins",
+    "desktop-ui/src-tauri",
 ]
