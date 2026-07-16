@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package prism;
+
+// The AI service interface that the Python engine hosts and Rust invokes
+service AiService {
+  // Parses raw natural language inputs into structured intents
+  rpc ParseIntent (IntentRequest) returns (IntentResponse);
+
+  // Performs root cause analysis and suggests diagnostic tasks/repairs
+  rpc AnalyzeRootCause (DiagnosisRequest) returns (DiagnosisResponse);
+
+  // Updates memory with a repair result so the AI can learn from successes/failures
+  rpc LearnFromRepair (LearningRequest) returns (LearningResponse);
+
+  // Heartbeat check to monitor microservice status
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message IntentRequest {
+  string raw_input = 1;
+  string platform = 2; // "windows", "linux", "macos"
+}
+
+message IntentResponse {
+  string intent = 1; // e.g., "clean_junk", "restart_service", "optimize_ram"
+  double confidence = 2;
+  map<string, string> entities = 3; // extracted parameters like { "target_disk": "C:", "ram_limit": "2GB" }
+  string reasoning = 4; // LLM's chain of thought explaining why it extracted this intent
+}
+
+message DiagnosisRequest {
+  string intent = 1;
+  string system_metrics_json = 2; // JSON representation of the system diagnostics (CPU, RAM, Processes, etc.)
+  string platform = 3;
+}
+
+message DiagnosisResponse {
+  string root_cause = 1;
+  string severity = 2; // "low", "medium", "high", "critical"
+  repeated Task action_plan = 3; // Generated sequence of actions
+  string explanation = 4;
+}
+
+message Task {
+  string id = 1;
+  string action = 2; // e.g., "kill_process", "clear_dir", "restart_service"
+  map<string, string> parameters = 3;
+  repeated string dependencies = 4; // IDs of tasks that must execute before this one
+  bool requires_privilege = 5;
+}
+
+message LearningRequest {
+  string raw_input = 1;
+  string intent = 2;
+  repeated Task executed_tasks = 3;
+  bool success = 4;
+  string error_message = 5;
+  string user_feedback = 6; // e.g., "system feels faster now"
+}
+
+message LearningResponse {
+  bool updated = 1;
+  string memory_id = 2; // Qdrant point UUID
+}
+
+message HealthCheckRequest {
+  string client_id = 1;
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string version = 2;
+  string status_message = 3;
+}

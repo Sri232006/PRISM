@@ -1,0 +1,10 @@
+[package]
+name = "terminal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+core-engine = { path = "../core-engine" }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

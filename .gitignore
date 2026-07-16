@@ -1,0 +1,22 @@
+# Rust Build Artifacts
+/target
+
+# Python Virtual Environments & Bytecode
+.venv/
+venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+ai-engine/.venv/
+
+# Local Database & SQLite files
+*.db
+*.db-journal
+*.sqlite
+
+# OS Specific files
+.DS_Store
+Thumbs.db
+desktop.ini
