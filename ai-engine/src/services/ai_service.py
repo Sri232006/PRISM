@@ -248,7 +248,36 @@ class AiServiceHandler(prism_pb2_grpc.AiServiceServicer):
 
     def LearnFromRepair(self, request, context):
         logger.info(f"LearnFromRepair invoked for intent={request.intent}, success={request.success}")
+        for task in request.executed_tasks:
+            logger.info(f"  - Task {task.id}: action={task.action}")
+        if request.error_message:
+            logger.warning(f"  - Error reported: {request.error_message}")
+        if request.user_feedback:
+            logger.info(f"  - User Feedback: {request.user_feedback}")
+
+        # Simulate writing to a local telemetry log file inside the workspace
+        import uuid
+        memory_id = str(uuid.uuid4())
+        try:
+            log_entry = {
+                "timestamp": time.time(),
+                "raw_input": request.raw_input,
+                "intent": request.intent,
+                "success": request.success,
+                "error_message": request.error_message,
+                "user_feedback": request.user_feedback,
+                "memory_id": memory_id,
+                "tasks": [{"id": t.id, "action": t.action} for t in request.executed_tasks]
+            }
+            # Append log entry to a JSON lines file
+            telemetry_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "telemetry_learning.jsonl"))
+            with open(telemetry_path, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+            logger.info(f"Telemetry log written successfully to: {telemetry_path}")
+        except Exception as e:
+            logger.error(f"Failed to write local telemetry log: {e}")
+
         return prism_pb2.LearningResponse(
             updated=True,
-            memory_id="00000000-0000-0000-0000-000000000000"
+            memory_id=memory_id
         )

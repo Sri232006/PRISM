@@ -2,7 +2,8 @@ use prism::ai_service_client::AiServiceClient;
 use prism::{
     IntentRequest, IntentResponse,
     HealthCheckRequest, HealthCheckResponse,
-    DiagnosisRequest, DiagnosisResponse
+    DiagnosisRequest, DiagnosisResponse,
+    LearningRequest, LearningResponse
 };
 use tonic::transport::Channel;
 use tracing::{info, error};
@@ -101,6 +102,43 @@ impl PrismClient {
                     error_code = ?status.code(),
                     error_msg = %status.message(),
                     "AnalyzeRootCause request failed"
+                );
+                Err(status)
+            }
+        }
+    }
+
+    /// Sends task execution results back to the AI reasoning engine so it can learn from successes/failures
+    pub async fn learn_from_repair(
+        &mut self,
+        raw_input: &str,
+        intent: &str,
+        executed_tasks: Vec<prism::Task>,
+        success: bool,
+        error_message: Option<&str>,
+        user_feedback: Option<&str>,
+    ) -> Result<LearningResponse, tonic::Status> {
+        let request = tonic::Request::new(LearningRequest {
+            raw_input: raw_input.to_string(),
+            intent: intent.to_string(),
+            executed_tasks,
+            success,
+            error_message: error_message.unwrap_or("").to_string(),
+            user_feedback: user_feedback.unwrap_or("").to_string(),
+        });
+
+        info!(intent = %intent, success = %success, "Sending LearnFromRepair request to AI Service");
+        match self.client.learn_from_repair(request).await {
+            Ok(response) => {
+                let inner = response.into_inner();
+                info!(updated = %inner.updated, memory_id = %inner.memory_id, "Received LearningResponse");
+                Ok(inner)
+            }
+            Err(status) => {
+                error!(
+                    error_code = ?status.code(),
+                    error_msg = %status.message(),
+                    "LearnFromRepair request failed"
                 );
                 Err(status)
             }
