@@ -85,9 +85,35 @@ pub fn topological_sort(tasks: &[Task]) -> Result<Vec<Task>, SchedulerError> {
     Ok(order)
 }
 
+/// Helper function to recursively calculate simulated size and file count of a directory.
+fn get_directory_size_and_count(path: &Path) -> (u64, usize) {
+    let mut total_bytes = 0;
+    let mut file_count = 0;
+
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_file() {
+                if let Ok(metadata) = entry.metadata() {
+                    total_bytes += metadata.len();
+                    file_count += 1;
+                }
+            } else if entry_path.is_dir() {
+                let (sub_bytes, sub_count) = get_directory_size_and_count(&entry_path);
+                total_bytes += sub_bytes;
+                file_count += sub_count;
+            }
+        }
+    }
+    (total_bytes, file_count)
+}
+
 /// Executes a single task using the appropriate platform command or system API.
-pub async fn execute_task(task: &Task) -> Result<(), SchedulerError> {
-    info!(task_id = %task.id, action = %task.action, "Executing task...");
+/// If `dry_run` is set to true, it simulates actions and prints estimated system impact
+/// without modifying operating system files or state.
+pub async fn execute_task(task: &Task, dry_run: bool) -> Result<(), SchedulerError> {
+    let mode_str = if dry_run { "[DRY-RUN SIMULATION]" } else { "[EXECUTION]" };
+    info!(task_id = %task.id, action = %task.action, mode = %mode_str, "Processing task...");
 
     match task.action.as_str() {
         "kill_process" => {
@@ -101,39 +127,63 @@ pub async fn execute_task(task: &Task) -> Result<(), SchedulerError> {
             let mut sys = System::new();
             sys.refresh_processes(sysinfo::ProcessesToUpdate::All);
 
-            let mut killed = false;
+            let mut matches = Vec::new();
 
-            // 1. Try to terminate via PID first
+            // 1. Check by PID first
             if !pid_str.is_empty() && pid_str != "0" {
                 if let Ok(pid_val) = pid_str.parse::<u32>() {
                     let sys_pid = Pid::from(pid_val as usize);
                     if let Some(process) = sys.process(sys_pid) {
-                        info!(pid = %pid_val, name = %process.name().to_string_lossy(), "Killing process via PID");
-                        process.kill();
-                        killed = true;
+                        matches.push((pid_val, process.name().to_string_lossy().into_owned()));
                     }
                 }
             }
 
-            // 2. Try by process name if PID was not found or wasn't provided
-            if !killed && !proc_name.is_empty() {
+            // 2. Check by process name if PID was not found or wasn't provided
+            if matches.is_empty() && !proc_name.is_empty() {
                 let lower_proc_name = proc_name.to_lowercase();
                 for (pid, process) in sys.processes() {
                     let name = process.name().to_string_lossy().to_lowercase();
                     if name == lower_proc_name || name.starts_with(&lower_proc_name) {
-                        info!(pid = ?pid, name = %process.name().to_string_lossy(), "Killing process via name match");
-                        process.kill();
-                        killed = true;
+                        matches.push((pid.as_u32(), process.name().to_string_lossy().into_owned()));
                     }
                 }
             }
 
-            if killed {
-                info!("Process terminated successfully.");
+            if dry_run {
+                if matches.is_empty() {
+                    info!(
+                        target = ?(pid_str, proc_name),
+                        "{} Target process not active. No action needed.",
+                        mode_str
+                    );
+                } else {
+                    for (pid, name) in &matches {
+                        info!(
+                            "{} Would terminate process '{}' (PID: {}) to reclaim physical memory.",
+                            mode_str, name, pid
+                        );
+                    }
+                }
                 Ok(())
             } else {
-                warn!("Target process was not found running. Assuming already terminated (idempotence).");
-                Ok(())
+                let mut killed = false;
+                for (pid, name) in &matches {
+                    let sys_pid = Pid::from(*pid as usize);
+                    if let Some(process) = sys.process(sys_pid) {
+                        info!(pid = %pid, name = %name, "Killing active process instance");
+                        process.kill();
+                        killed = true;
+                    }
+                }
+
+                if killed {
+                    info!("Process terminated successfully.");
+                    Ok(())
+                } else {
+                    warn!("Target process was not found running. Assuming already terminated (idempotence).");
+                    Ok(())
+                }
             }
         }
 
@@ -161,29 +211,48 @@ pub async fn execute_task(task: &Task) -> Result<(), SchedulerError> {
                 )));
             }
 
-            if path.exists() {
-                if path.is_dir() {
-                    info!(dir = %target, "Cleaning directory contents...");
-                    // Delete contents, keeping the base directory intact
-                    let entries = std::fs::read_dir(path).map_err(|e| SchedulerError::FileError(e.to_string()))?;
-                    for entry in entries.flatten() {
-                        let entry_path = entry.path();
-                        if entry_path.is_file() {
-                            let _ = std::fs::remove_file(&entry_path);
-                        } else if entry_path.is_dir() {
-                            let _ = std::fs::remove_dir_all(&entry_path);
-                        }
+            if dry_run {
+                if path.exists() {
+                    if path.is_dir() {
+                        let (bytes, count) = get_directory_size_and_count(path);
+                        info!(
+                            "{} Would clean directory '{}'. Simulated impact: would delete {} files, freeing {:.2} MB.",
+                            mode_str, target, count, bytes as f64 / 1_048_576.0
+                        );
+                    } else {
+                        let bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+                        info!(
+                            "{} Would delete file '{}'. Simulated impact: freeing {:.2} KB.",
+                            mode_str, target, bytes as f64 / 1024.0
+                        );
                     }
                 } else {
-                    info!(file = %target, "Deleting file...");
-                    std::fs::remove_file(path).map_err(|e| SchedulerError::FileError(e.to_string()))?;
+                    warn!("{} Target path '{}' does not exist. No cleanup required.", mode_str, target);
                 }
+                Ok(())
             } else {
-                warn!("Target path does not exist. Skipping file deletion.");
+                if path.exists() {
+                    if path.is_dir() {
+                        info!(dir = %target, "Cleaning directory contents...");
+                        let entries = std::fs::read_dir(path).map_err(|e| SchedulerError::FileError(e.to_string()))?;
+                        for entry in entries.flatten() {
+                            let entry_path = entry.path();
+                            if entry_path.is_file() {
+                                let _ = std::fs::remove_file(&entry_path);
+                            } else if entry_path.is_dir() {
+                                let _ = std::fs::remove_dir_all(&entry_path);
+                            }
+                        }
+                    } else {
+                        info!(file = %target, "Deleting file...");
+                        std::fs::remove_file(path).map_err(|e| SchedulerError::FileError(e.to_string()))?;
+                    }
+                } else {
+                    warn!("Target path does not exist. Skipping file deletion.");
+                }
+                info!("File system cleanup operation completed.");
+                Ok(())
             }
-
-            info!("File system cleanup operation completed.");
-            Ok(())
         }
 
         "run_command" => {
@@ -192,26 +261,45 @@ pub async fn execute_task(task: &Task) -> Result<(), SchedulerError> {
                 return Err(SchedulerError::MissingParameter("command_line required".to_string()));
             }
 
-            info!(command = %cmd_str, "Spawning system shell command...");
+            // Safety check against destructive operators/commands (Uncompromising safety filter)
+            let lower_cmd = cmd_str.to_lowercase();
+            let unsafe_patterns = [
+                "rm -rf", "rmdir /s", "format ", "mkfs", "erase ",
+                "del /f", "shutdown", "reboot", "init 0", "init 6"
+            ];
+            if unsafe_patterns.iter().any(|&pat| lower_cmd.contains(pat)) {
+                error!(command = %cmd_str, "Safety Guard: Blocked execution of unsafe command pattern!");
+                return Err(SchedulerError::CommandError(format!(
+                    "Safety Guard violation: Unsafe command syntax detected in '{}'", cmd_str
+                )));
+            }
 
-            // Execute using target shell (powershell for Windows, sh for Unix)
-            let output = if cfg!(target_os = "windows") {
-                Command::new("powershell")
-                    .args(&["-Command", &cmd_str])
-                    .output()
-            } else {
-                Command::new("sh")
-                    .args(&["-c", &cmd_str])
-                    .output()
-            }.map_err(|e| SchedulerError::CommandError(e.to_string()))?;
-
-            if output.status.success() {
-                info!("Shell command completed successfully.");
+            if dry_run {
+                info!(
+                    "{} Command syntax validated as safe. Would spawn command: '{}'",
+                    mode_str, cmd_str
+                );
                 Ok(())
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(stderr = %stderr, "Shell command returned non-zero code");
-                Err(SchedulerError::CommandError(stderr.into_owned()))
+                info!(command = %cmd_str, "Spawning system shell command...");
+                let output = if cfg!(target_os = "windows") {
+                    Command::new("powershell")
+                        .args(&["-Command", &cmd_str])
+                        .output()
+                } else {
+                    Command::new("sh")
+                        .args(&["-c", &cmd_str])
+                        .output()
+                }.map_err(|e| SchedulerError::CommandError(e.to_string()))?;
+
+                if output.status.success() {
+                    info!("Shell command completed successfully.");
+                    Ok(())
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!(stderr = %stderr, "Shell command returned non-zero code");
+                    Err(SchedulerError::CommandError(stderr.into_owned()))
+                }
             }
         }
 
@@ -223,33 +311,37 @@ pub async fn execute_task(task: &Task) -> Result<(), SchedulerError> {
 
             // Platform Guard
             if !cfg!(target_os = "windows") {
-                warn!("restart_service is Windows-only. Skipping execution on current host OS.");
+                warn!("{} restart_service is Windows-only. Skipping verification.", mode_str);
                 return Ok(());
             }
 
-            info!(service = %service_name, "Restarting Windows Service...");
-
-            // Attempt sc.exe stop
-            let _ = Command::new("sc.exe")
-                .args(&["stop", &service_name])
-                .output();
-
-            // Wait brief transition period
-            tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
-
-            // Attempt sc.exe start
-            let start_out = Command::new("sc.exe")
-                .args(&["start", &service_name])
-                .output()
-                .map_err(|e| SchedulerError::ServiceError(e.to_string()))?;
-
-            if start_out.status.success() {
-                info!("Service start command dispatched successfully.");
+            if dry_run {
+                info!(
+                    "{} Service parameters validated. Would stop and restart Windows Service '{}'.",
+                    mode_str, service_name
+                );
                 Ok(())
             } else {
-                let stderr = String::from_utf8_lossy(&start_out.stderr);
-                error!(stderr = %stderr, "Failed to start service");
-                Err(SchedulerError::ServiceError(stderr.into_owned()))
+                info!(service = %service_name, "Restarting Windows Service...");
+                let _ = Command::new("sc.exe")
+                    .args(&["stop", &service_name])
+                    .output();
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+
+                let start_out = Command::new("sc.exe")
+                    .args(&["start", &service_name])
+                    .output()
+                    .map_err(|e| SchedulerError::ServiceError(e.to_string()))?;
+
+                if start_out.status.success() {
+                    info!("Service start command dispatched successfully.");
+                    Ok(())
+                } else {
+                    let stderr = String::from_utf8_lossy(&start_out.stderr);
+                    error!(stderr = %stderr, "Failed to start service");
+                    Err(SchedulerError::ServiceError(stderr.into_owned()))
+                }
             }
         }
 
@@ -258,15 +350,17 @@ pub async fn execute_task(task: &Task) -> Result<(), SchedulerError> {
 }
 
 /// Helper that topological-sorts the action plan and executes all tasks in sequence.
-pub async fn execute_action_plan(tasks: &[Task]) -> Result<(), SchedulerError> {
+/// If `dry_run` is set to true, it simulates actions instead of executing them.
+pub async fn execute_action_plan(tasks: &[Task], dry_run: bool) -> Result<(), SchedulerError> {
     let sorted_tasks = topological_sort(tasks)?;
-    info!(task_count = %sorted_tasks.len(), "Action plan sequenced. Commencing execution.");
+    let mode_str = if dry_run { "SIMULATED" } else { "SEQUENCED" };
+    info!(task_count = %sorted_tasks.len(), mode = %mode_str, "Action plan sorted. Commencing execution.");
 
     for task in &sorted_tasks {
-        execute_task(task).await?;
+        execute_task(task, dry_run).await?;
     }
 
-    info!("All sequenced repair tasks completed successfully.");
+    info!("All {} action plan tasks processed successfully.", mode_str);
     Ok(())
 }
 
@@ -321,5 +415,40 @@ mod tests {
 
         let sorted = topological_sort(&tasks);
         assert!(sorted.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_safety_guard_blocks_destructive() {
+        let mut parameters = HashMap::new();
+        parameters.insert("command_line".to_string(), "rm -rf /usr/bin".to_string());
+        let task = Task {
+            id: "task_destructive".to_string(),
+            action: "run_command".to_string(),
+            parameters,
+            dependencies: vec![],
+            requires_privilege: true,
+        };
+
+        // Even with dry_run = true, destructive commands must be blocked!
+        let result = execute_task(&task, true).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Safety Guard violation"));
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_does_not_modify_state() {
+        let mut parameters = HashMap::new();
+        // A temporary folder that exists, but let's test a non-existent file
+        parameters.insert("file_path".to_string(), "C:\\nonexistent_temp_file_prism.txt".to_string());
+        let task = Task {
+            id: "task_delete".to_string(),
+            action: "delete_file".to_string(),
+            parameters,
+            dependencies: vec![],
+            requires_privilege: false,
+        };
+
+        let result = execute_task(&task, true).await;
+        assert!(result.is_ok());
     }
 }

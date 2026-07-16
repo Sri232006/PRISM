@@ -122,14 +122,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 println!("=================================\n");
 
-                // Execute the repair tasks
-                println!(">>> COMMENCING REPAIR EXECUTION...");
-                match scheduler::execute_action_plan(&diag.action_plan).await {
+                // Step A: Dry Run Simulation
+                println!(">>> COMMENCING DRY-RUN SIMULATION (SAFETY AUDIT)...");
+                match scheduler::execute_action_plan(&diag.action_plan, true).await {
                     Ok(_) => {
-                        println!("\n[PRISM CLI] SUCCESS: All repair actions completed successfully!\n");
+                        println!("\n[PRISM CLI] DRY-RUN SUCCESS: Safe path verification and resource reclamation estimation complete.\n");
+                        
+                        // Step B: Actual execution (once dry-run succeeds)
+                        println!(">>> COMMENCING ACTUAL REPAIR EXECUTION...");
+                        match scheduler::execute_action_plan(&diag.action_plan, false).await {
+                            Ok(_) => {
+                                println!("\n[PRISM CLI] SUCCESS: All repair actions completed successfully!\n");
+                            }
+                            Err(e) => {
+                                println!("\n[PRISM CLI] ERROR: Repair execution failed: {}\n", e);
+                            }
+                        }
                     }
                     Err(e) => {
-                        println!("\n[PRISM CLI] ERROR: Repair execution failed: {}\n", e);
+                        println!("\n[PRISM CLI] DRY-RUN FAILURE: Action plan is unsafe or contains errors: {}\n", e);
                     }
                 }
             }
@@ -183,20 +194,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 println!("=================================\n");
 
-                // Execute the repair tasks
-                println!(">>> COMMENCING REPAIR EXECUTION...");
-                match scheduler::execute_action_plan(&diag.action_plan).await {
+                // Step A: Dry Run Simulation
+                println!(">>> COMMENCING DRY-RUN SIMULATION (SAFETY AUDIT)...");
+                match scheduler::execute_action_plan(&diag.action_plan, true).await {
                     Ok(_) => {
-                        println!("\n[PRISM CLI] SUCCESS: Network reset actions completed successfully!\n");
+                        println!("\n[PRISM CLI] DRY-RUN SUCCESS: Network reset simulation completed safely.\n");
+
+                        // Step B: Actual execution
+                        println!(">>> COMMENCING ACTUAL REPAIR EXECUTION...");
+                        match scheduler::execute_action_plan(&diag.action_plan, false).await {
+                            Ok(_) => {
+                                println!("\n[PRISM CLI] SUCCESS: Network reset actions completed successfully!\n");
+                            }
+                            Err(e) => {
+                                println!("\n[PRISM CLI] ERROR: Network reset execution failed: {}\n", e);
+                            }
+                        }
                     }
                     Err(e) => {
-                        println!("\n[PRISM CLI] ERROR: Network reset execution failed: {}\n", e);
+                        println!("\n[PRISM CLI] DRY-RUN FAILURE: Network reset simulation blocked: {}\n", e);
                     }
                 }
             }
             Err(status) => {
                 tracing::error!("AnalyzeRootCause RPC returned an error: Code = {:?}, Message = '{}'", status.code(), status.message());
             }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // INTEGRATION SCENARIO 3: Unsafe command safety guard interception
+    // -------------------------------------------------------------
+    println!("\n>>> RUNNING SCENARIO 3: SAFETY GUARD INTERCEPTION (DESTRUCTIVE COMMAND)");
+    let unsafe_task = core_engine::client::prism::Task {
+        id: "task_format_disk".to_string(),
+        action: "run_command".to_string(),
+        parameters: {
+            let mut map = std::collections::HashMap::new();
+            map.insert("command_line".to_string(), "format D: /fs:ntfs /q /y".to_string());
+            map
+        },
+        dependencies: vec![],
+        requires_privilege: true,
+    };
+
+    let unsafe_plan = vec![unsafe_task];
+
+    println!(">>> COMMENCING DRY-RUN SIMULATION ON UNTRUSTED PLAN...");
+    match scheduler::execute_action_plan(&unsafe_plan, true).await {
+        Ok(_) => {
+            println!("\n[PRISM CLI] WARNING: Unsafe plan was not blocked! (Safety Failure)\n");
+        }
+        Err(e) => {
+            println!("\n[PRISM CLI] SUCCESS: Unsafe plan was blocked by Safety Guard! Error: {}\n", e);
         }
     }
 
